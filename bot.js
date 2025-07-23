@@ -1,4 +1,3 @@
-// ... same imports
 require('dotenv').config();
 const express = require('express');
 const { Telegraf, session, Markup } = require('telegraf');
@@ -8,7 +7,7 @@ const app = express();
 const bot = new Telegraf(process.env.BOT_TOKEN);
 bot.use(session());
 
-// Webhook
+// Webhook setup
 app.use(express.json());
 app.use(bot.webhookCallback('/webhook'));
 bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}/webhook`);
@@ -17,30 +16,24 @@ bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}/webhook`);
 const SIGNUP_BONUS = 50;
 const REFERRAL_BONUS = 50;
 const MIN_WITHDRAW = 350;
-const GROUP_USERNAME = process.env.GROUP_USERNAME;
+const GROUP_USERNAME = process.env.GROUP_USERNAME.replace('@', '');
 const WHATSAPP_LINK = process.env.WHATSAPP_LINK;
 
-// Firebase helpers
-const userRef = (userId) => database.ref(`users/${userId}`);
-const getUser = async (userId) => {
-  const snap = await userRef(userId).once('value');
-  return snap.exists() ? snap.val() : null;
-};
-const saveUser = async (userId, data) => {
-  await userRef(userId).update(data);
-};
+// Firebase Helpers
+const userRef = (id) => database.ref(`users/${id}`);
+const getUser = async (id) => (await userRef(id).once('value')).val();
+const saveUser = async (id, data) => userRef(id).update(data);
 
-// Home buttons
-function homeButtons() {
-  return Markup.inlineKeyboard([
+// Helpers
+const homeButtons = () =>
+  Markup.inlineKeyboard([
     [Markup.button.callback('💰 My Balance', 'balance')],
     [Markup.button.callback('👥 My Referrals', 'referrals')],
     [Markup.button.callback('📤 Withdraw', 'withdraw')],
-    [Markup.button.callback('🔗 Copy My Referral Link', 'myref')]
+    [Markup.button.callback('🔗 Copy My Referral Link', 'myref')],
   ]);
-}
 
-// Start command
+// Start Command
 bot.start(async (ctx) => {
   const userId = ctx.from.id.toString();
   const username = ctx.from.first_name;
@@ -51,18 +44,19 @@ bot.start(async (ctx) => {
     return ctx.reply('✅ You are already registered.', homeButtons());
   }
 
-  ctx.session.refCode = refCode;
-  ctx.session.awaitingJoin = true;
+  ctx.session = { refCode, awaitingJoin: true };
 
-  return ctx.reply(
+  const msg = await ctx.reply(
     `👋 Welcome ${username}!\n\nPlease complete the following steps to continue:`,
     Markup.inlineKeyboard([
-      [Markup.button.url('✅ Join Telegram Group', `https://t.me/${GROUP_USERNAME.replace('@', '')}`)],
+      [Markup.button.url('✅ Join Telegram Group', `https://t.me/${GROUP_USERNAME}`)],
       [Markup.button.url('✅ Join WhatsApp Group', WHATSAPP_LINK)],
       [Markup.button.callback('🚀 I\'ve Joined Both', 'verify_join')],
-      [Markup.button.callback('❌ Cancel', 'cancel')]
+      [Markup.button.callback('❌ Cancel', 'cancel')],
     ])
   );
+
+  ctx.session.lastMsgId = msg.message_id;
 });
 
 // Verify Join
@@ -70,12 +64,21 @@ bot.action('verify_join', async (ctx) => {
   await ctx.answerCbQuery();
   const userId = ctx.from.id.toString();
   const username = ctx.from.first_name;
-  const refCode = ctx.session.refCode;
-
+  const refCode = ctx.session?.refCode;
   const existing = await getUser(userId);
+
   if (existing) return ctx.reply('✅ You are already registered.', homeButtons());
 
-  // Proceed without group verification (manual confirm)
+  // Check group join status
+  try {
+    const member = await ctx.telegram.getChatMember(`@${GROUP_USERNAME}`, userId);
+    if (!['member', 'administrator', 'creator'].includes(member.status)) {
+      return ctx.reply('❗ You must join the group to continue.');
+    }
+  } catch {
+    return ctx.reply('❗ Could not verify group join. Try again.');
+  }
+
   const newUser = {
     id: userId,
     imuid: `IM${userId}`,
@@ -83,8 +86,10 @@ bot.action('verify_join', async (ctx) => {
     balance: SIGNUP_BONUS,
     referrals: [],
     withdrawals: [],
-    ref_by: refCode || ''
+    ref_by: refCode || '',
+    joined: new Date().toISOString()
   };
+
   await saveUser(userId, newUser);
 
   // Handle referral
@@ -97,7 +102,8 @@ bot.action('verify_join', async (ctx) => {
     }
   }
 
-  ctx.session.awaitingJoin = false;
+  ctx.session = null;
+
   const botUsername = (await ctx.telegram.getMe()).username;
   const referralLink = `https://t.me/${botUsername}?start=${userId}`;
 
@@ -116,13 +122,14 @@ bot.action('cancel', async (ctx) => {
 
 // Balance
 bot.action('balance', async (ctx) => {
+  await ctx.answerCbQuery();
   const user = await getUser(ctx.from.id);
-  const balance = user?.balance || 0;
-  return ctx.reply(`💰 Your current balance is ₦${balance}`, homeButtons());
+  return ctx.reply(`💰 Your current balance is ₦${user?.balance || 0}`, homeButtons());
 });
 
-// Referral link
+// Referral Link
 bot.action('myref', async (ctx) => {
+  await ctx.answerCbQuery();
   const botUsername = (await ctx.telegram.getMe()).username;
   const link = `https://t.me/${botUsername}?start=${ctx.from.id}`;
   return ctx.reply(`🔗 Your referral link:\n${link}`, homeButtons());
@@ -130,14 +137,14 @@ bot.action('myref', async (ctx) => {
 
 // Referrals
 bot.action('referrals', async (ctx) => {
+  await ctx.answerCbQuery();
   const user = await getUser(ctx.from.id);
   const referrals = user?.referrals || [];
-  if (referrals.length === 0) {
-    return ctx.reply('👥 No referrals yet.', homeButtons());
-  }
+
+  if (referrals.length === 0) return ctx.reply('👥 No referrals yet.', homeButtons());
 
   let text = `👥 You’ve invited ${referrals.length} user(s):\n`;
-  for (let r of referrals) {
+  for (const r of referrals) {
     const refUser = await getUser(r);
     text += `- @${refUser?.username || 'Unknown'}\n`;
   }
@@ -145,38 +152,40 @@ bot.action('referrals', async (ctx) => {
   return ctx.reply(text, homeButtons());
 });
 
-// Withdraw flow
+// Withdraw Flow
 bot.action('withdraw', async (ctx) => {
+  await ctx.answerCbQuery();
   const user = await getUser(ctx.from.id);
+
   if (user.balance < MIN_WITHDRAW) {
     return ctx.reply(`❌ You need at least ₦${MIN_WITHDRAW} to withdraw.`, homeButtons());
   }
 
   ctx.session.withdraw = { step: 'phone' };
-  return ctx.reply('📱 Enter your phone number for airtime:', homeButtons());
+  return ctx.reply('📱 Enter your phone number for airtime:');
 });
 
-// Handle user input
+// User Input
 bot.on('text', async (ctx) => {
-  ctx.session = ctx.session || {};
-  const step = ctx.session.withdraw?.step;
+  const step = ctx.session?.withdraw?.step;
   const userId = ctx.from.id.toString();
+
+  if (!step) return;
 
   if (step === 'phone') {
     ctx.session.withdraw.phone = ctx.message.text;
     ctx.session.withdraw.step = 'network';
-    return ctx.reply('📶 Enter your network (MTN, Airtel, Glo, 9mobile):', homeButtons());
+    return ctx.reply('📶 Enter your network (MTN, Airtel, Glo, 9mobile):');
   }
 
   if (step === 'network') {
-    const phone = ctx.session.withdraw.phone;
+    const { phone } = ctx.session.withdraw;
     const network = ctx.message.text;
     const amount = MIN_WITHDRAW;
-
     const user = await getUser(userId);
-    const withdrawals = user.withdrawals || [];
 
-    withdrawals.push({ amount, phone, network, status: 'pending' });
+    const withdrawals = user.withdrawals || [];
+    withdrawals.push({ amount, phone, network, status: 'pending', date: new Date().toISOString() });
 
     await saveUser(userId, {
       balance: user.balance - amount,
@@ -184,11 +193,15 @@ bot.on('text', async (ctx) => {
     });
 
     ctx.session.withdraw = null;
-    return ctx.reply(`✅ Withdrawal request of ₦${amount} submitted!\n📱 Airtime will be sent to ${phone} (${network})`, homeButtons());
+
+    return ctx.reply(
+      `✅ Withdrawal request of ₦${amount} submitted!\n📱 Airtime will be sent to ${phone} (${network})`,
+      homeButtons()
+    );
   }
 });
 
-// Health
+// Health Check
 app.get('/', (req, res) => res.send('✅ Airtime bot is running.'));
 
 // Start Server
