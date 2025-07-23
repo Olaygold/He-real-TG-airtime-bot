@@ -15,8 +15,8 @@ bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}/webhook`);
 const SIGNUP_BONUS = 50;
 const REFERRAL_BONUS = 50;
 const MIN_WITHDRAW = 350;
-const GROUP_USERNAME = process.env.GROUP_USERNAME; // e.g. '@mygroup'
-const WHATSAPP_LINK = process.env.WHATSAPP_LINK;   // just check link sent
+const GROUP_USERNAME = process.env.GROUP_USERNAME;
+const WHATSAPP_LINK = process.env.WHATSAPP_LINK;
 
 // Firebase helpers
 const userRef = (userId) => db.ref(`users/${userId}`);
@@ -28,7 +28,7 @@ const saveUser = async (userId, data) => {
   await userRef(userId).update(data);
 };
 
-// Join checks
+// Group join check
 async function hasJoinedGroup(ctx) {
   try {
     const member = await ctx.telegram.getChatMember(GROUP_USERNAME, ctx.from.id);
@@ -38,23 +38,21 @@ async function hasJoinedGroup(ctx) {
   }
 }
 
-// Bot Handlers
+// Bot handlers
 bot.start(async (ctx) => {
   const userId = ctx.from.id.toString();
   const username = ctx.from.first_name;
   const refCode = ctx.message.text.split(' ')[1];
   const existing = await getUser(userId);
 
-  if (existing) {
-    return ctx.reply('✅ You are already registered.');
-  }
+  if (existing) return ctx.reply('✅ You are already registered.');
 
   const joinedGroup = await hasJoinedGroup(ctx);
   if (!joinedGroup) {
     return ctx.reply(`❌ Please join our Telegram group first: https://t.me/${GROUP_USERNAME.replace('@', '')}`);
   }
 
-  await ctx.reply(`📱 Please also join our WhatsApp group before continuing:\n${WHATSAPP_LINK}\n\nOnce done, type *joined* to continue.`, { parse_mode: 'Markdown' });
+  await ctx.reply(`📱 Also join our WhatsApp group before continuing:\n${WHATSAPP_LINK}\n\nOnce done, type *joined* to continue.`, { parse_mode: 'Markdown' });
   ctx.session.awaitingWhatsapp = true;
 });
 
@@ -159,6 +157,6 @@ bot.on('text', async (ctx) => {
   }
 });
 
-// Express Route
+// Express route
 app.get('/', (req, res) => res.send('✅ Airtime bot is running.'));
-app.listen(process.env.PORT || 3000, () => console.log('Bot is live.'));
+app.listen(process.env.PORT || 3000, () => console.log('🚀 Bot is live.'));
