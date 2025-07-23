@@ -7,7 +7,6 @@ const app = express();
 const bot = new Telegraf(process.env.BOT_TOKEN);
 bot.use(session());
 
-// Webhook
 app.use(express.json());
 app.use(bot.webhookCallback('/webhook'));
 bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}/webhook`);
@@ -18,19 +17,16 @@ const MIN_WITHDRAW = 350;
 const GROUP_USERNAME = process.env.GROUP_USERNAME.replace('@', '');
 const WHATSAPP_LINK = process.env.WHATSAPP_LINK;
 
-// Firebase Helpers
 const userRef = (id) => database.ref(`users/${id}`);
 const getUser = async (id) => (await userRef(id).once('value')).val();
 const saveUser = async (id, data) => userRef(id).update(data);
 
-// Delete previous bot message
 const deletePrevious = async (ctx) => {
   if (ctx.session?.lastMsgId) {
     try { await ctx.deleteMessage(ctx.session.lastMsgId); } catch {}
   }
 };
 
-// Home menu
 const homeButtons = () =>
   Markup.inlineKeyboard([
     [Markup.button.callback('💰 My Balance', 'balance')],
@@ -47,10 +43,7 @@ bot.start(async (ctx) => {
   const username = ctx.from.first_name;
   const refCode = ctx.message.text.split(' ')[1];
   const existing = await getUser(userId);
-
-  if (existing) {
-    return ctx.reply('✅ You are already registered.', homeButtons());
-  }
+  if (existing) return ctx.reply('✅ You are already registered.', homeButtons());
 
   ctx.session = { refCode, awaitingJoin: true };
 
@@ -68,20 +61,23 @@ bot.start(async (ctx) => {
 });
 
 // Verify Join
-
-
 bot.action('verify_join', async (ctx) => {
   await ctx.answerCbQuery();
+  await deletePrevious(ctx);
+
   const userId = ctx.from.id.toString();
   const username = ctx.from.first_name;
-  const refCode = ctx.session.refCode;
-
+  const refCode = ctx.session?.refCode;
   const existing = await getUser(userId);
   if (existing) return ctx.reply('✅ You are already registered.', homeButtons());
 
-  const joinedGroup = await hasJoinedGroup(ctx);
-  if (!joinedGroup) {
-    return ctx.reply(`❌ Please join our Telegram group first.\n👉 https://t.me/${GROUP_USERNAME.replace('@', '')}`);
+  try {
+    const member = await ctx.telegram.getChatMember(`@${GROUP_USERNAME}`, userId);
+    if (!['member', 'administrator', 'creator'].includes(member.status)) {
+      return ctx.reply('❗ You must join the Telegram group to continue.');
+    }
+  } catch {
+    return ctx.reply('❗ Could not verify Telegram group join. Try again.');
   }
 
   const newUser = {
@@ -91,48 +87,30 @@ bot.action('verify_join', async (ctx) => {
     balance: SIGNUP_BONUS,
     referrals: [],
     withdrawals: [],
-    ref_by: refCode || ''
+    ref_by: refCode || '',
+    joined: new Date().toISOString(),
   };
   await saveUser(userId, newUser);
 
-  // Handle referral
-  
-
-
-
-
   if (refCode && refCode !== userId) {
-  const refUser = await getUser(refCode);
-  if (refUser) {
-    const updatedReferrals = Array.isArray(refUser.referrals) ? refUser.referrals : [];
-    if (!updatedReferrals.includes(userId)) {
-      updatedReferrals.push(userId);
-      const updatedBalance = (refUser.balance || 0) + REFERRAL_BONUS;
+    const referralPath = database.ref(`referrals_by/${refCode}/${userId}`);
+    const alreadyReferred = (await referralPath.once('value')).val();
 
-      await saveUser(refUser.id || refCode, {
-        referrals: updatedReferrals,
-        balance: updatedBalance,
-      });
+    if (!alreadyReferred) {
+      await referralPath.set(true);
+      const refUser = await getUser(refCode);
+      if (refUser) {
+        const updatedRefs = refUser.referrals || [];
+        if (!updatedRefs.includes(userId)) {
+          updatedRefs.push(userId);
+          await saveUser(refCode, {
+            balance: refUser.balance + REFERRAL_BONUS,
+            referrals: updatedRefs,
+          });
+        }
+      }
     }
   }
-  }
-
-  ctx.session.awaitingJoin = false;
-
-  const botUsername = ctx.me || bot.options.username || 'YourBotUsername';
-  const referralLink = `https://t.me/${botUsername}?start=${userId}`;
-
-  await ctx.reply(
-    `🎉 Welcome ${username}!\n\nYou've received ₦${SIGNUP_BONUS} signup bonus.\n\n🔗 Your referral link:\n${referralLink}`,
-    homeButtons()
-  );
-});
-
-
-
-
-
-
 
   ctx.session = null;
   const botUsername = (await ctx.telegram.getMe()).username;
@@ -176,6 +154,7 @@ bot.action('referrals', async (ctx) => {
   await deletePrevious(ctx);
   const user = await getUser(ctx.from.id);
   const refs = user?.referrals || [];
+
   if (refs.length === 0) {
     const msg = await ctx.reply('👥 No referrals yet.', homeButtons());
     ctx.session = { lastMsgId: msg.message_id };
@@ -239,7 +218,6 @@ bot.on('text', async (ctx) => {
     const now = new Date();
     const isSunday = now.getDay() === 0;
     const hour = now.getHours();
-
     const { phone } = ctx.session.withdraw;
     const network = ctx.message.text;
     const user = await getUser(userId);
@@ -300,7 +278,7 @@ bot.action('withdraw_history', async (ctx) => {
   ctx.session = { lastMsgId: msg.message_id };
 });
 
-// Monitor referral approvals (optional external admin hook)
+// Monitor Withdrawal Approvals
 const monitorWithdrawalApprovals = () => {
   database.ref('users').on('child_changed', async (snap) => {
     const user = snap.val();
