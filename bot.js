@@ -18,21 +18,19 @@ const MIN_WITHDRAW = 350;
 const GROUP_USERNAME = process.env.GROUP_USERNAME.replace('@', '');
 const WHATSAPP_LINK = process.env.WHATSAPP_LINK;
 
-// Firebase helpers
+// Firebase Helpers
 const userRef = (id) => database.ref(`users/${id}`);
 const getUser = async (id) => (await userRef(id).once('value')).val();
 const saveUser = async (id, data) => userRef(id).update(data);
 
-// Delete last bot message
+// Delete previous bot message
 const deletePrevious = async (ctx) => {
   if (ctx.session?.lastMsgId) {
-    try {
-      await ctx.deleteMessage(ctx.session.lastMsgId);
-    } catch {}
+    try { await ctx.deleteMessage(ctx.session.lastMsgId); } catch {}
   }
 };
 
-// Menu
+// Home menu
 const homeButtons = () =>
   Markup.inlineKeyboard([
     [Markup.button.callback('💰 My Balance', 'balance')],
@@ -43,7 +41,7 @@ const homeButtons = () =>
     [Markup.button.callback('ℹ️ About This Bot', 'about')],
   ]);
 
-// Start
+// /start
 bot.start(async (ctx) => {
   const userId = ctx.from.id.toString();
   const username = ctx.from.first_name;
@@ -173,13 +171,13 @@ bot.action('about', async (ctx) => {
   await ctx.answerCbQuery();
   await deletePrevious(ctx);
   const msg = await ctx.reply(
-    `🤖 *About This Bot*\n\n✅ Earn ₦50 per referral.\n🎁 ₦50 signup bonus.\n💸 Minimum withdrawal is ₦${MIN_WITHDRAW}.\n\n📤 Withdrawals are *only available on Sundays between 7PM–8PM.*`,
+    `🤖 *About This Bot*\n\n✅ Earn ₦50 per referral.\n🎁 ₦50 signup bonus.\n💸 Withdraw only on Sundays (7PM–8PM).`,
     { parse_mode: 'Markdown', ...homeButtons() }
   );
   ctx.session = { lastMsgId: msg.message_id };
 });
 
-// Withdraw
+// Withdraw (Start Flow)
 bot.action('withdraw', async (ctx) => {
   await ctx.answerCbQuery();
   await deletePrevious(ctx);
@@ -190,22 +188,12 @@ bot.action('withdraw', async (ctx) => {
     return;
   }
 
-  // Sunday check
-  const now = new Date();
-  const isSunday = now.getDay() === 0;
-  const hour = now.getHours();
-  if (!(isSunday && hour >= 19 && hour < 20)) {
-    const msg = await ctx.reply('⏳ Withdrawals are only accepted on Sundays between 7PM and 8PM.', homeButtons());
-    ctx.session = { lastMsgId: msg.message_id };
-    return;
-  }
-
   ctx.session.withdraw = { step: 'phone' };
   const msg = await ctx.reply('📱 Enter your phone number for airtime:');
   ctx.session.lastMsgId = msg.message_id;
 });
 
-// Handle Text Inputs
+// Withdrawal Submission
 bot.on('text', async (ctx) => {
   const step = ctx.session?.withdraw?.step;
   const userId = ctx.from.id.toString();
@@ -222,10 +210,24 @@ bot.on('text', async (ctx) => {
   }
 
   if (step === 'network') {
-    const network = ctx.message.text;
+    const now = new Date();
+    const isSunday = now.getDay() === 0;
+    const hour = now.getHours();
+
     const { phone } = ctx.session.withdraw;
+    const network = ctx.message.text;
     const user = await getUser(userId);
     const amount = MIN_WITHDRAW;
+
+    if (!(isSunday && hour >= 19 && hour < 20)) {
+      ctx.session.withdraw = null;
+      const msg = await ctx.reply('⏳ You can only *submit* withdrawals on Sundays (7PM–8PM). Try again later.', {
+        parse_mode: 'Markdown',
+        ...homeButtons(),
+      });
+      ctx.session = { lastMsgId: msg.message_id };
+      return;
+    }
 
     const withdrawals = user.withdrawals || [];
     withdrawals.push({
@@ -242,7 +244,10 @@ bot.on('text', async (ctx) => {
     });
 
     ctx.session = null;
-    const msg = await ctx.reply(`✅ Withdrawal request of ₦${amount} submitted!\n📱 ${phone} (${network})`, homeButtons());
+    const msg = await ctx.reply(
+      `✅ Withdrawal request of ₦${amount} submitted!\n📱 ${phone} (${network})`,
+      homeButtons()
+    );
     ctx.session = { lastMsgId: msg.message_id };
   }
 });
@@ -253,6 +258,7 @@ bot.action('withdraw_history', async (ctx) => {
   await deletePrevious(ctx);
   const user = await getUser(ctx.from.id);
   const history = user?.withdrawals || [];
+
   if (history.length === 0) {
     const msg = await ctx.reply('📄 No withdrawal history found.', homeButtons());
     ctx.session = { lastMsgId: msg.message_id };
@@ -268,14 +274,16 @@ bot.action('withdraw_history', async (ctx) => {
   ctx.session = { lastMsgId: msg.message_id };
 });
 
-// Notify on status change — call this separately on your admin panel update
+// Monitor referral approvals (optional external admin hook)
 const monitorWithdrawalApprovals = () => {
   database.ref('users').on('child_changed', async (snap) => {
     const user = snap.val();
     if (!user?.withdrawals) return;
     const last = user.withdrawals[user.withdrawals.length - 1];
     if (last.status === 'approved' && !last.notified) {
-      await bot.telegram.sendMessage(user.id, `✅ Your withdrawal request of ₦${last.amount} has been *APPROVED*!`, { parse_mode: 'Markdown' });
+      await bot.telegram.sendMessage(user.id, `✅ Your withdrawal request of ₦${last.amount} has been *APPROVED*!`, {
+        parse_mode: 'Markdown',
+      });
       last.notified = true;
       await saveUser(user.id, { withdrawals: user.withdrawals });
     }
@@ -283,7 +291,7 @@ const monitorWithdrawalApprovals = () => {
 };
 monitorWithdrawalApprovals();
 
-// Health check
+// Health
 app.get('/', (req, res) => res.send('✅ Bot running'));
 
 // Start server
