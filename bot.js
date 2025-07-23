@@ -1,3 +1,4 @@
+// ... same imports
 require('dotenv').config();
 const express = require('express');
 const { Telegraf, session, Markup } = require('telegraf');
@@ -29,18 +30,7 @@ const saveUser = async (userId, data) => {
   await userRef(userId).update(data);
 };
 
-// Check if user joined Telegram group
-async function hasJoinedGroup(ctx) {
-  try {
-    const member = await ctx.telegram.getChatMember(GROUP_USERNAME, ctx.from.id);
-    return ['member', 'administrator', 'creator'].includes(member.status);
-  } catch (err) {
-    console.error('Group join check failed:', err.message);
-    return false;
-  }
-}
-
-// Home menu buttons
+// Home buttons
 function homeButtons() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('💰 My Balance', 'balance')],
@@ -50,7 +40,7 @@ function homeButtons() {
   ]);
 }
 
-// START
+// Start command
 bot.start(async (ctx) => {
   const userId = ctx.from.id.toString();
   const username = ctx.from.first_name;
@@ -61,7 +51,10 @@ bot.start(async (ctx) => {
     return ctx.reply('✅ You are already registered.', homeButtons());
   }
 
-  await ctx.reply(
+  ctx.session.refCode = refCode;
+  ctx.session.awaitingJoin = true;
+
+  return ctx.reply(
     `👋 Welcome ${username}!\n\nPlease complete the following steps to continue:`,
     Markup.inlineKeyboard([
       [Markup.button.url('✅ Join Telegram Group', `https://t.me/${GROUP_USERNAME.replace('@', '')}`)],
@@ -70,12 +63,9 @@ bot.start(async (ctx) => {
       [Markup.button.callback('❌ Cancel', 'cancel')]
     ])
   );
-
-  ctx.session.refCode = refCode;
-  ctx.session.awaitingJoin = true;
 });
 
-// Verify join
+// Verify Join
 bot.action('verify_join', async (ctx) => {
   await ctx.answerCbQuery();
   const userId = ctx.from.id.toString();
@@ -85,11 +75,7 @@ bot.action('verify_join', async (ctx) => {
   const existing = await getUser(userId);
   if (existing) return ctx.reply('✅ You are already registered.', homeButtons());
 
-  const joinedGroup = await hasJoinedGroup(ctx);
-  if (!joinedGroup) {
-    return ctx.reply(`❌ Please join our Telegram group first.\n👉 https://t.me/${GROUP_USERNAME.replace('@', '')}`);
-  }
-
+  // Proceed without group verification (manual confirm)
   const newUser = {
     id: userId,
     imuid: `IM${userId}`,
@@ -101,6 +87,7 @@ bot.action('verify_join', async (ctx) => {
   };
   await saveUser(userId, newUser);
 
+  // Handle referral
   if (refCode && refCode !== userId) {
     const refUser = await getUser(refCode);
     if (refUser && !refUser.referrals.includes(userId)) {
@@ -111,11 +98,10 @@ bot.action('verify_join', async (ctx) => {
   }
 
   ctx.session.awaitingJoin = false;
-
-  const botUsername = ctx.me || 'YourBotUsername';
+  const botUsername = (await ctx.telegram.getMe()).username;
   const referralLink = `https://t.me/${botUsername}?start=${userId}`;
 
-  await ctx.reply(
+  return ctx.reply(
     `🎉 Welcome ${username}!\n\nYou've received ₦${SIGNUP_BONUS} signup bonus.\n\n🔗 Your referral link:\n${referralLink}`,
     homeButtons()
   );
@@ -125,20 +111,21 @@ bot.action('verify_join', async (ctx) => {
 bot.action('cancel', async (ctx) => {
   await ctx.answerCbQuery();
   ctx.session = null;
-  ctx.reply('❌ Registration cancelled.');
+  return ctx.reply('❌ Registration cancelled.', homeButtons());
 });
 
 // Balance
 bot.action('balance', async (ctx) => {
   const user = await getUser(ctx.from.id);
-  ctx.reply(`💰 Your current balance is ₦${user?.balance || 0}`);
+  const balance = user?.balance || 0;
+  return ctx.reply(`💰 Your current balance is ₦${balance}`, homeButtons());
 });
 
 // Referral link
 bot.action('myref', async (ctx) => {
-  const botUsername = ctx.me || 'YourBotUsername';
+  const botUsername = (await ctx.telegram.getMe()).username;
   const link = `https://t.me/${botUsername}?start=${ctx.from.id}`;
-  ctx.reply(`🔗 Your referral link:\n${link}`);
+  return ctx.reply(`🔗 Your referral link:\n${link}`, homeButtons());
 });
 
 // Referrals
@@ -146,7 +133,7 @@ bot.action('referrals', async (ctx) => {
   const user = await getUser(ctx.from.id);
   const referrals = user?.referrals || [];
   if (referrals.length === 0) {
-    return ctx.reply('👥 No referrals yet.');
+    return ctx.reply('👥 No referrals yet.', homeButtons());
   }
 
   let text = `👥 You’ve invited ${referrals.length} user(s):\n`;
@@ -155,21 +142,21 @@ bot.action('referrals', async (ctx) => {
     text += `- @${refUser?.username || 'Unknown'}\n`;
   }
 
-  ctx.reply(text);
+  return ctx.reply(text, homeButtons());
 });
 
-// Withdraw
+// Withdraw flow
 bot.action('withdraw', async (ctx) => {
   const user = await getUser(ctx.from.id);
   if (user.balance < MIN_WITHDRAW) {
-    return ctx.reply(`❌ You need at least ₦${MIN_WITHDRAW} to withdraw.`);
+    return ctx.reply(`❌ You need at least ₦${MIN_WITHDRAW} to withdraw.`, homeButtons());
   }
 
   ctx.session.withdraw = { step: 'phone' };
-  ctx.reply('📱 Enter your phone number for airtime:');
+  return ctx.reply('📱 Enter your phone number for airtime:', homeButtons());
 });
 
-// Handle withdrawal input
+// Handle user input
 bot.on('text', async (ctx) => {
   ctx.session = ctx.session || {};
   const step = ctx.session.withdraw?.step;
@@ -178,7 +165,7 @@ bot.on('text', async (ctx) => {
   if (step === 'phone') {
     ctx.session.withdraw.phone = ctx.message.text;
     ctx.session.withdraw.step = 'network';
-    return ctx.reply('📶 Enter your network (MTN, Airtel, Glo, 9mobile):');
+    return ctx.reply('📶 Enter your network (MTN, Airtel, Glo, 9mobile):', homeButtons());
   }
 
   if (step === 'network') {
@@ -197,11 +184,11 @@ bot.on('text', async (ctx) => {
     });
 
     ctx.session.withdraw = null;
-    return ctx.reply(`✅ Withdrawal request of ₦${amount} submitted!\n📱 Airtime will be sent to ${phone} (${network})`);
+    return ctx.reply(`✅ Withdrawal request of ₦${amount} submitted!\n📱 Airtime will be sent to ${phone} (${network})`, homeButtons());
   }
 });
 
-// Health Check
+// Health
 app.get('/', (req, res) => res.send('✅ Airtime bot is running.'));
 
 // Start Server
