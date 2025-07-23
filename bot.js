@@ -1,30 +1,12 @@
 require('dotenv').config();
 const express = require('express');
-const { Telegraf } = require('telegraf');
-const admin = require('firebase-admin');
+const { Telegraf, session } = require('telegraf');
+const db = require('./fire');
 
-// Initialize Firebase
-const serviceAccount = {
-  type: 'service_account',
-  project_id: process.env.FIREBASE_PROJECT_ID,
-  private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
-  private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-  client_email: process.env.FIREBASE_CLIENT_EMAIL,
-  client_id: "",
-  auth_uri: "https://accounts.google.com/o/oauth2/auth",
-  token_uri: "https://oauth2.googleapis.com/token",
-  auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs",
-  client_x509_cert_url: `https://www.googleapis.com/robot/v1/metadata/x509/${encodeURIComponent(process.env.FIREBASE_CLIENT_EMAIL)}`
-};
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  databaseURL: process.env.FIREBASE_DATABASE_URL
-});
-const db = admin.database();
-
-// Init Express & Telegraf
+// Express and Telegraf setup
 const app = express();
 const bot = new Telegraf(process.env.BOT_TOKEN);
+bot.use(session());
 
 app.use(bot.webhookCallback('/webhook'));
 bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}/webhook`);
@@ -33,34 +15,30 @@ bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}/webhook`);
 const SIGNUP_BONUS = 50;
 const REFERRAL_BONUS = 50;
 const MIN_WITHDRAW = 350;
-const GROUP_USERNAME = process.env.GROUP_USERNAME;
-const WHATSAPP_LINK = process.env.WHATSAPP_LINK;
+const GROUP_USERNAME = process.env.GROUP_USERNAME; // e.g. '@mygroup'
+const WHATSAPP_LINK = process.env.WHATSAPP_LINK;   // just check link sent
 
 // Firebase helpers
-function userRef(userId) {
-  return db.ref(`users/${userId}`);
-}
-
-async function getUser(userId) {
+const userRef = (userId) => db.ref(`users/${userId}`);
+const getUser = async (userId) => {
   const snap = await userRef(userId).once('value');
   return snap.exists() ? snap.val() : null;
-}
-
-async function saveUser(userId, data) {
+};
+const saveUser = async (userId, data) => {
   await userRef(userId).update(data);
-}
+};
 
-// Check if user joined group
+// Join checks
 async function hasJoinedGroup(ctx) {
   try {
     const member = await ctx.telegram.getChatMember(GROUP_USERNAME, ctx.from.id);
     return ['member', 'administrator', 'creator'].includes(member.status);
   } catch (e) {
-    return true; // assume joined if private group
+    return false;
   }
 }
 
-// Handlers
+// Bot Handlers
 bot.start(async (ctx) => {
   const userId = ctx.from.id.toString();
   const username = ctx.from.first_name;
@@ -71,10 +49,24 @@ bot.start(async (ctx) => {
     return ctx.reply('✅ You are already registered.');
   }
 
-  const joined = await hasJoinedGroup(ctx);
-  if (!joined) {
-    return ctx.reply(`❌ Please join our group first: ${GROUP_USERNAME}`);
+  const joinedGroup = await hasJoinedGroup(ctx);
+  if (!joinedGroup) {
+    return ctx.reply(`❌ Please join our Telegram group first: https://t.me/${GROUP_USERNAME.replace('@', '')}`);
   }
+
+  await ctx.reply(`📱 Please also join our WhatsApp group before continuing:\n${WHATSAPP_LINK}\n\nOnce done, type *joined* to continue.`, { parse_mode: 'Markdown' });
+  ctx.session.awaitingWhatsapp = true;
+});
+
+bot.hears(/joined/i, async (ctx) => {
+  if (!ctx.session.awaitingWhatsapp) return;
+
+  const userId = ctx.from.id.toString();
+  const username = ctx.from.first_name;
+  const refCode = ctx.message.text.split(' ')[1];
+
+  const existing = await getUser(userId);
+  if (existing) return ctx.reply('✅ You are already registered.');
 
   await saveUser(userId, {
     id: userId,
@@ -94,9 +86,8 @@ bot.start(async (ctx) => {
     }
   }
 
-  await ctx.reply(`🎉 Welcome ${username}! You’ve received ₦${SIGNUP_BONUS} signup bonus.\n\n` +
-    `👥 Join Telegram Group: https://t.me/${GROUP_USERNAME.replace('@', '')}\n` +
-    `📱 WhatsApp Group (optional): ${WHATSAPP_LINK}`);
+  ctx.session.awaitingWhatsapp = false;
+  await ctx.reply(`🎉 Welcome ${username}! You’ve received ₦${SIGNUP_BONUS} signup bonus.`);
 });
 
 bot.command('balance', async (ctx) => {
@@ -133,7 +124,6 @@ bot.command('withdraw', async (ctx) => {
     return ctx.reply(`❌ You need at least ₦${MIN_WITHDRAW} to withdraw.`);
   }
 
-  ctx.session = ctx.session || {};
   ctx.session.withdraw = { step: 'phone' };
   ctx.reply('📱 Please enter your phone number for airtime:');
 });
@@ -169,6 +159,6 @@ bot.on('text', async (ctx) => {
   }
 });
 
-// Express routes
+// Express Route
 app.get('/', (req, res) => res.send('✅ Airtime bot is running.'));
 app.listen(process.env.PORT || 3000, () => console.log('Bot is live.'));
