@@ -1,14 +1,16 @@
 require('dotenv').config();
 const express = require('express');
 const { Telegraf, session } = require('telegraf');
-const db = require('./fire');
+const { database } = require('./fire');
 
-// Express and Telegraf setup
 const app = express();
 const bot = new Telegraf(process.env.BOT_TOKEN);
 bot.use(session());
 
+app.use(express.json()); // Important for webhook
 app.use(bot.webhookCallback('/webhook'));
+
+// Set the webhook
 bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}/webhook`);
 
 // Constants
@@ -19,7 +21,7 @@ const GROUP_USERNAME = process.env.GROUP_USERNAME;
 const WHATSAPP_LINK = process.env.WHATSAPP_LINK;
 
 // Firebase helpers
-const userRef = (userId) => db.ref(`users/${userId}`);
+const userRef = (userId) => database.ref(`users/${userId}`);
 const getUser = async (userId) => {
   const snap = await userRef(userId).once('value');
   return snap.exists() ? snap.val() : null;
@@ -28,17 +30,17 @@ const saveUser = async (userId, data) => {
   await userRef(userId).update(data);
 };
 
-// Group join check
+// Check if user is in the group
 async function hasJoinedGroup(ctx) {
   try {
     const member = await ctx.telegram.getChatMember(GROUP_USERNAME, ctx.from.id);
     return ['member', 'administrator', 'creator'].includes(member.status);
-  } catch (e) {
+  } catch {
     return false;
   }
 }
 
-// Bot handlers
+// Start command
 bot.start(async (ctx) => {
   const userId = ctx.from.id.toString();
   const username = ctx.from.first_name;
@@ -56,6 +58,7 @@ bot.start(async (ctx) => {
   ctx.session.awaitingWhatsapp = true;
 });
 
+// After WhatsApp join
 bot.hears(/joined/i, async (ctx) => {
   if (!ctx.session.awaitingWhatsapp) return;
 
@@ -88,17 +91,20 @@ bot.hears(/joined/i, async (ctx) => {
   await ctx.reply(`🎉 Welcome ${username}! You’ve received ₦${SIGNUP_BONUS} signup bonus.`);
 });
 
+// Show balance
 bot.command('balance', async (ctx) => {
   const user = await getUser(ctx.from.id);
   const bal = user?.balance || 0;
   ctx.reply(`💰 Your current balance is ₦${bal}`);
 });
 
+// Referral link
 bot.command('refer', async (ctx) => {
   const link = `https://t.me/${ctx.me}?start=${ctx.from.id}`;
   ctx.reply(`🔗 Your referral link:\n${link}`);
 });
 
+// History
 bot.command('history', async (ctx) => {
   const user = await getUser(ctx.from.id);
   const referrals = user?.referrals || [];
@@ -116,6 +122,7 @@ bot.command('history', async (ctx) => {
   ctx.reply(text);
 });
 
+// Withdraw command
 bot.command('withdraw', async (ctx) => {
   const user = await getUser(ctx.from.id);
   if (user.balance < MIN_WITHDRAW) {
@@ -126,10 +133,11 @@ bot.command('withdraw', async (ctx) => {
   ctx.reply('📱 Please enter your phone number for airtime:');
 });
 
+// Handle text input
 bot.on('text', async (ctx) => {
-  const userId = ctx.from.id.toString();
   ctx.session = ctx.session || {};
   const step = ctx.session.withdraw?.step;
+  const userId = ctx.from.id.toString();
 
   if (step === 'phone') {
     ctx.session.withdraw.phone = ctx.message.text;
@@ -157,6 +165,11 @@ bot.on('text', async (ctx) => {
   }
 });
 
-// Express route
+// Home route
 app.get('/', (req, res) => res.send('✅ Airtime bot is running.'));
-app.listen(process.env.PORT || 3000, () => console.log('🚀 Bot is live.'));
+
+// Start server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 Bot is live on port ${PORT}`);
+});
