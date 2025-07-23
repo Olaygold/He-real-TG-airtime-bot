@@ -1,5 +1,5 @@
 // fire.js
-const firebase = require("firebase/app");
+const firebase = require("firebase-admin");
 require("firebase/database"); // For Realtime Database
 
 const firebaseConfig = {
