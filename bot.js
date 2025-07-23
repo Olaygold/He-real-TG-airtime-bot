@@ -7,12 +7,11 @@ const app = express();
 const bot = new Telegraf(process.env.BOT_TOKEN);
 bot.use(session());
 
-// Webhook setup
+// Webhook
 app.use(express.json());
 app.use(bot.webhookCallback('/webhook'));
 bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}/webhook`);
 
-// Constants
 const SIGNUP_BONUS = 50;
 const REFERRAL_BONUS = 50;
 const MIN_WITHDRAW = 350;
@@ -24,25 +23,27 @@ const userRef = (id) => database.ref(`users/${id}`);
 const getUser = async (id) => (await userRef(id).once('value')).val();
 const saveUser = async (id, data) => userRef(id).update(data);
 
-// Helpers
+// Delete last bot message
+const deletePrevious = async (ctx) => {
+  if (ctx.session?.lastMsgId) {
+    try {
+      await ctx.deleteMessage(ctx.session.lastMsgId);
+    } catch {}
+  }
+};
+
+// Menu
 const homeButtons = () =>
   Markup.inlineKeyboard([
     [Markup.button.callback('💰 My Balance', 'balance')],
     [Markup.button.callback('👥 My Referrals', 'referrals')],
     [Markup.button.callback('📤 Withdraw', 'withdraw')],
-    [Markup.button.callback('🔗 Copy My Referral Link', 'myref')],
+    [Markup.button.callback('📄 Withdraw History', 'withdraw_history')],
+    [Markup.button.callback('🔗 My Referral Link', 'myref')],
+    [Markup.button.callback('ℹ️ About This Bot', 'about')],
   ]);
 
-// Delete previous reply if exists
-const deletePrevious = async (ctx) => {
-  if (ctx.session?.lastMsgId) {
-    try {
-      await ctx.deleteMessage(ctx.session.lastMsgId);
-    } catch (e) {}
-  }
-};
-
-// Start command
+// Start
 bot.start(async (ctx) => {
   const userId = ctx.from.id.toString();
   const username = ctx.from.first_name;
@@ -68,7 +69,7 @@ bot.start(async (ctx) => {
   ctx.session.lastMsgId = msg.message_id;
 });
 
-// Verify group join
+// Verify Join
 bot.action('verify_join', async (ctx) => {
   await ctx.answerCbQuery();
   await deletePrevious(ctx);
@@ -77,12 +78,8 @@ bot.action('verify_join', async (ctx) => {
   const username = ctx.from.first_name;
   const refCode = ctx.session?.refCode;
   const existing = await getUser(userId);
+  if (existing) return ctx.reply('✅ You are already registered.', homeButtons());
 
-  if (existing) {
-    return ctx.reply('✅ You are already registered.', homeButtons());
-  }
-
-  // Check Telegram group
   try {
     const member = await ctx.telegram.getChatMember(`@${GROUP_USERNAME}`, userId);
     if (!['member', 'administrator', 'creator'].includes(member.status)) {
@@ -92,7 +89,6 @@ bot.action('verify_join', async (ctx) => {
     return ctx.reply('❗ Could not verify Telegram group join. Try again.');
   }
 
-  // Save new user
   const newUser = {
     id: userId,
     imuid: `IM${userId}`,
@@ -105,10 +101,9 @@ bot.action('verify_join', async (ctx) => {
   };
   await saveUser(userId, newUser);
 
-  // Handle referral
   if (refCode && refCode !== userId) {
     const refUser = await getUser(refCode);
-    if (refUser && Array.isArray(refUser.referrals) && !refUser.referrals.includes(userId)) {
+    if (refUser && !refUser.referrals.includes(userId)) {
       refUser.balance += REFERRAL_BONUS;
       refUser.referrals.push(userId);
       await saveUser(refCode, refUser);
@@ -117,10 +112,9 @@ bot.action('verify_join', async (ctx) => {
 
   ctx.session = null;
   const botUsername = (await ctx.telegram.getMe()).username;
-  const referralLink = `https://t.me/${botUsername}?start=${userId}`;
-
+  const link = `https://t.me/${botUsername}?start=${userId}`;
   return ctx.reply(
-    `🎉 Welcome ${username}!\n\nYou've received ₦${SIGNUP_BONUS} signup bonus.\n\n🔗 Your referral link:\n${referralLink}`,
+    `🎉 Welcome ${username}!\nYou've received ₦${SIGNUP_BONUS} signup bonus.\n\n🔗 Your referral link:\n${link}`,
     homeButtons()
   );
 });
@@ -156,18 +150,16 @@ bot.action('myref', async (ctx) => {
 bot.action('referrals', async (ctx) => {
   await ctx.answerCbQuery();
   await deletePrevious(ctx);
-
   const user = await getUser(ctx.from.id);
-  const referrals = user?.referrals || [];
-
-  if (referrals.length === 0) {
+  const refs = user?.referrals || [];
+  if (refs.length === 0) {
     const msg = await ctx.reply('👥 No referrals yet.', homeButtons());
     ctx.session = { lastMsgId: msg.message_id };
     return;
   }
 
-  let text = `👥 You’ve invited ${referrals.length} user(s):\n`;
-  for (const r of referrals) {
+  let text = `👥 You’ve invited ${refs.length} user(s):\n`;
+  for (const r of refs) {
     const refUser = await getUser(r);
     text += `- @${refUser?.username || 'Unknown'}\n`;
   }
@@ -176,14 +168,34 @@ bot.action('referrals', async (ctx) => {
   ctx.session = { lastMsgId: msg.message_id };
 });
 
+// About
+bot.action('about', async (ctx) => {
+  await ctx.answerCbQuery();
+  await deletePrevious(ctx);
+  const msg = await ctx.reply(
+    `🤖 *About This Bot*\n\n✅ Earn ₦50 per referral.\n🎁 ₦50 signup bonus.\n💸 Minimum withdrawal is ₦${MIN_WITHDRAW}.\n\n📤 Withdrawals are *only available on Sundays between 7PM–8PM.*`,
+    { parse_mode: 'Markdown', ...homeButtons() }
+  );
+  ctx.session = { lastMsgId: msg.message_id };
+});
+
 // Withdraw
 bot.action('withdraw', async (ctx) => {
   await ctx.answerCbQuery();
   await deletePrevious(ctx);
   const user = await getUser(ctx.from.id);
-
   if (user.balance < MIN_WITHDRAW) {
     const msg = await ctx.reply(`❌ You need at least ₦${MIN_WITHDRAW} to withdraw.`, homeButtons());
+    ctx.session = { lastMsgId: msg.message_id };
+    return;
+  }
+
+  // Sunday check
+  const now = new Date();
+  const isSunday = now.getDay() === 0;
+  const hour = now.getHours();
+  if (!(isSunday && hour >= 19 && hour < 20)) {
+    const msg = await ctx.reply('⏳ Withdrawals are only accepted on Sundays between 7PM and 8PM.', homeButtons());
     ctx.session = { lastMsgId: msg.message_id };
     return;
   }
@@ -193,7 +205,7 @@ bot.action('withdraw', async (ctx) => {
   ctx.session.lastMsgId = msg.message_id;
 });
 
-// Handle user text input
+// Handle Text Inputs
 bot.on('text', async (ctx) => {
   const step = ctx.session?.withdraw?.step;
   const userId = ctx.from.id.toString();
@@ -210,10 +222,10 @@ bot.on('text', async (ctx) => {
   }
 
   if (step === 'network') {
-    const { phone } = ctx.session.withdraw;
     const network = ctx.message.text;
-    const amount = MIN_WITHDRAW;
+    const { phone } = ctx.session.withdraw;
     const user = await getUser(userId);
+    const amount = MIN_WITHDRAW;
 
     const withdrawals = user.withdrawals || [];
     withdrawals.push({
@@ -229,18 +241,50 @@ bot.on('text', async (ctx) => {
       withdrawals,
     });
 
-    ctx.session.withdraw = null;
-
-    const msg = await ctx.reply(
-      `✅ Withdrawal request of ₦${amount} submitted!\n📱 Airtime will be sent to ${phone} (${network})`,
-      homeButtons()
-    );
+    ctx.session = null;
+    const msg = await ctx.reply(`✅ Withdrawal request of ₦${amount} submitted!\n📱 ${phone} (${network})`, homeButtons());
     ctx.session = { lastMsgId: msg.message_id };
   }
 });
 
+// Withdrawal History
+bot.action('withdraw_history', async (ctx) => {
+  await ctx.answerCbQuery();
+  await deletePrevious(ctx);
+  const user = await getUser(ctx.from.id);
+  const history = user?.withdrawals || [];
+  if (history.length === 0) {
+    const msg = await ctx.reply('📄 No withdrawal history found.', homeButtons());
+    ctx.session = { lastMsgId: msg.message_id };
+    return;
+  }
+
+  let text = `📄 Your Withdrawal History:\n`;
+  history.slice(-5).reverse().forEach((w, i) => {
+    text += `\n#${i + 1}: ₦${w.amount} to ${w.phone} (${w.network}) - *${w.status.toUpperCase()}*`;
+  });
+
+  const msg = await ctx.reply(text, { parse_mode: 'Markdown', ...homeButtons() });
+  ctx.session = { lastMsgId: msg.message_id };
+});
+
+// Notify on status change — call this separately on your admin panel update
+const monitorWithdrawalApprovals = () => {
+  database.ref('users').on('child_changed', async (snap) => {
+    const user = snap.val();
+    if (!user?.withdrawals) return;
+    const last = user.withdrawals[user.withdrawals.length - 1];
+    if (last.status === 'approved' && !last.notified) {
+      await bot.telegram.sendMessage(user.id, `✅ Your withdrawal request of ₦${last.amount} has been *APPROVED*!`, { parse_mode: 'Markdown' });
+      last.notified = true;
+      await saveUser(user.id, { withdrawals: user.withdrawals });
+    }
+  });
+};
+monitorWithdrawalApprovals();
+
 // Health check
-app.get('/', (req, res) => res.send('✅ Airtime bot is running.'));
+app.get('/', (req, res) => res.send('✅ Bot running'));
 
 // Start server
 const PORT = process.env.PORT || 3000;
