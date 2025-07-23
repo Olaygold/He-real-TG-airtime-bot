@@ -96,16 +96,25 @@ bot.action('verify_join', async (ctx) => {
   await saveUser(userId, newUser);
 
   // Handle referral
+  
+
+
+
+
   if (refCode && refCode !== userId) {
-    const refUser = await getUser(refCode);
-    if (refUser) {
-      refUser.referrals = refUser.referrals || [];
-      if (!refUser.referrals.includes(userId)) {
-        refUser.referrals.push(userId);
-        refUser.balance += REFERRAL_BONUS;
-        await saveUser(refCode, refUser);
-      }
+  const refUser = await getUser(refCode);
+  if (refUser) {
+    const updatedReferrals = Array.isArray(refUser.referrals) ? refUser.referrals : [];
+    if (!updatedReferrals.includes(userId)) {
+      updatedReferrals.push(userId);
+      const updatedBalance = (refUser.balance || 0) + REFERRAL_BONUS;
+
+      await saveUser(refUser.id || refCode, {
+        referrals: updatedReferrals,
+        balance: updatedBalance,
+      });
     }
+  }
   }
 
   ctx.session.awaitingJoin = false;
