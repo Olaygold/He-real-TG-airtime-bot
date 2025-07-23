@@ -210,6 +210,14 @@ app.use(express.json());
 app.use(bot.webhookCallback('/webhook'));
 bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}/webhook`);
 
+
+bot.on('message', (ctx) => {
+  if (ctx.chat && ctx.chat.type.includes('group')) {
+    console.log('👥 Group ID:', ctx.chat.id);
+    ctx.reply(`✅ Your Group ID is: \`${ctx.chat.id}\``, { parse_mode: 'Markdown' });
+  }
+});
+
 // OR launch manually for local/dev testing
 if (!process.env.WEBHOOK_URL) {
   bot.launch();
