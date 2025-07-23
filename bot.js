@@ -68,23 +68,20 @@ bot.start(async (ctx) => {
 });
 
 // Verify Join
+
+
 bot.action('verify_join', async (ctx) => {
   await ctx.answerCbQuery();
-  await deletePrevious(ctx);
-
   const userId = ctx.from.id.toString();
   const username = ctx.from.first_name;
-  const refCode = ctx.session?.refCode;
+  const refCode = ctx.session.refCode;
+
   const existing = await getUser(userId);
   if (existing) return ctx.reply('✅ You are already registered.', homeButtons());
 
-  try {
-    const member = await ctx.telegram.getChatMember(`@${GROUP_USERNAME}`, userId);
-    if (!['member', 'administrator', 'creator'].includes(member.status)) {
-      return ctx.reply('❗ You must join the Telegram group to continue.');
-    }
-  } catch {
-    return ctx.reply('❗ Could not verify Telegram group join. Try again.');
+  const joinedGroup = await hasJoinedGroup(ctx);
+  if (!joinedGroup) {
+    return ctx.reply(`❌ Please join our Telegram group first.\n👉 https://t.me/${GROUP_USERNAME.replace('@', '')}`);
   }
 
   const newUser = {
@@ -94,19 +91,39 @@ bot.action('verify_join', async (ctx) => {
     balance: SIGNUP_BONUS,
     referrals: [],
     withdrawals: [],
-    ref_by: refCode || '',
-    joined: new Date().toISOString(),
+    ref_by: refCode || ''
   };
   await saveUser(userId, newUser);
 
+  // Handle referral
   if (refCode && refCode !== userId) {
     const refUser = await getUser(refCode);
-    if (refUser && !refUser.referrals.includes(userId)) {
-      refUser.balance += REFERRAL_BONUS;
-      refUser.referrals.push(userId);
-      await saveUser(refCode, refUser);
+    if (refUser) {
+      refUser.referrals = refUser.referrals || [];
+      if (!refUser.referrals.includes(userId)) {
+        refUser.referrals.push(userId);
+        refUser.balance += REFERRAL_BONUS;
+        await saveUser(refCode, refUser);
+      }
     }
   }
+
+  ctx.session.awaitingJoin = false;
+
+  const botUsername = ctx.me || bot.options.username || 'YourBotUsername';
+  const referralLink = `https://t.me/${botUsername}?start=${userId}`;
+
+  await ctx.reply(
+    `🎉 Welcome ${username}!\n\nYou've received ₦${SIGNUP_BONUS} signup bonus.\n\n🔗 Your referral link:\n${referralLink}`,
+    homeButtons()
+  );
+});
+
+
+
+
+
+
 
   ctx.session = null;
   const botUsername = (await ctx.telegram.getMe()).username;
