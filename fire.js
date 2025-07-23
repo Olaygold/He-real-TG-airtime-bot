@@ -1,6 +1,6 @@
 // fire.js
 const firebase = require("firebase/app");
-require("firebase/database"); // include this if you're using Realtime Database
+require("firebase/database"); // For Realtime Database
 
 const firebaseConfig = {
   apiKey: "AIzaSyDSpnEAsAGQou1Jl2Guy4nlrmtwcnSPoBw",
@@ -12,11 +12,14 @@ const firebaseConfig = {
   appId: "1:736784284446:web:8539c5a00e8adc3467670f"
 };
 
-// Initialize Firebase only once
+// Initialize Firebase if it hasn't been initialized
 if (!firebase.apps.length) {
   firebase.initializeApp(firebaseConfig);
 }
 
 const database = firebase.database();
 
-module.exports = { firebase, database };
+module.exports = {
+  firebase,
+  database
+};
