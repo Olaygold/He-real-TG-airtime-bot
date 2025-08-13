@@ -13,6 +13,83 @@ const typeMap = {
   betting: 6, electricity: 7, withdrawal: 8, datacard: 9
 };
 
+// === Create tables if not exist ===
+async function ensureTables() {
+  console.log("🛠 Creating tables if not exist...");
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS disabled_plans (
+      id SERIAL PRIMARY KEY,
+      network VARCHAR(50) NOT NULL,
+      plan_type VARCHAR(50) NOT NULL,
+      status BOOLEAN DEFAULT false,
+      UNIQUE (network, plan_type)
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      uid VARCHAR(100) UNIQUE NOT NULL,
+      full_name VARCHAR(255),
+      email VARCHAR(255),
+      phone VARCHAR(50),
+      balance NUMERIC(15,2) DEFAULT 0,
+      is_admin BOOLEAN DEFAULT false
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_accounts (
+      id SERIAL PRIMARY KEY,
+      uid VARCHAR(100) NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+      bank_name VARCHAR(100),
+      account_number VARCHAR(50) UNIQUE,
+      account_name VARCHAR(255),
+      provider VARCHAR(100)
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS withdrawals (
+      id VARCHAR(100) PRIMARY KEY,
+      uid VARCHAR(100) NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+      amount NUMERIC(15,2) DEFAULT 0,
+      status INT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS transactions (
+      id SERIAL PRIMARY KEY,
+      request_id VARCHAR(100) UNIQUE NOT NULL,
+      uid VARCHAR(100) NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+      type_id INT,
+      status_id INT,
+      amount NUMERIC(15,2),
+      amount_charged NUMERIC(15,2),
+      discount NUMERIC(15,2),
+      balance_before NUMERIC(15,2),
+      balance_after NUMERIC(15,2),
+      phone VARCHAR(50),
+      product VARCHAR(255),
+      service_id VARCHAR(100),
+      customer_id VARCHAR(255),
+      reference VARCHAR(255),
+      order_id VARCHAR(255),
+      message TEXT,
+      gross_amount NUMERIC(15,2),
+      fee NUMERIC(15,2),
+      net_amount NUMERIC(15,2),
+      transaction_ref VARCHAR(255),
+      extra JSONB
+    );
+  `);
+
+  console.log("✅ All tables ensured!");
+}
+
 // === Deep Clean ===
 async function deepCleanTables() {
   console.log("🧹 Clearing old data...");
@@ -29,8 +106,8 @@ async function migrate() {
   try {
     console.log("🚀 Starting migration from RTDB → PostgreSQL");
 
-    // Step 0: Clear existing data
-    await deepCleanTables();
+    await ensureTables(); // ✅ Make sure tables exist first
+    await deepCleanTables(); // ✅ Then clear them
 
     // 1️⃣ Disabled Plans
     const disabledPlansSnap = await database.ref("vtu/disabledPlans").once("value");
