@@ -1,212 +1,171 @@
-const { admin } = require("./fire");
-const firestore = admin.firestore();
+const { admin, database } = require("./fire"); // RTDB connection
 const { Pool } = require("pg");
 
-// === PostgreSQL connection ===
 const pool = new Pool({
   connectionString: "postgresql://postgres:xnkFLFwceOoYidzkKmaYJodaSYFPbMnB@gondola.proxy.rlwy.net:59649/railway",
   ssl: { rejectUnauthorized: false }
 });
 
 // === Mappings ===
-const statusMap = {
-  success: 1,
-  failed: 2,
-  pending: 3,
-  refunded: 4,
-  processing: 5
-};
-
+const statusMap = { success: 1, failed: 2, pending: 3, refunded: 4, processing: 5 };
 const typeMap = {
-  airtime: 1,
-  data: 2,
-  tv: 3,
-  epins: 4,
-  deposit: 5,
-  betting: 6,
-  electricity: 7,
-  withdrawal: 8,
-  datacard: 9
+  airtime: 1, data: 2, tv: 3, epins: 4, deposit: 5,
+  betting: 6, electricity: 7, withdrawal: 8, datacard: 9
 };
 
-let nextRequestId = 1;
-
-// === Utility: check if record exists ===
-async function recordExists(table, column, value) {
-  if (!value) return false;
-  const res = await pool.query(`SELECT 1 FROM ${table} WHERE ${column} = $1 LIMIT 1`, [value]);
-  return res.rowCount > 0;
+// === Deep Clean ===
+async function deepCleanTables() {
+  console.log("🧹 Clearing old data...");
+  await pool.query("TRUNCATE TABLE transactions RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE TABLE withdrawals RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE TABLE user_accounts RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE TABLE users RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE TABLE disabled_plans RESTART IDENTITY CASCADE");
+  console.log("✅ All tables cleared!");
 }
 
-// === Utility: expand schema to avoid varchar errors ===
-async function ensureSchemaReady() {
-  console.log("🔄 Ensuring schema can handle large values...");
-  await pool.query(`
-    ALTER TABLE transactions ALTER COLUMN request_id TYPE VARCHAR(150);
-    ALTER TABLE transactions ALTER COLUMN reference TYPE VARCHAR(150);
-    ALTER TABLE transactions ALTER COLUMN order_id TYPE VARCHAR(150);
-    ALTER TABLE transactions ALTER COLUMN customer_id TYPE VARCHAR(150);
-    ALTER TABLE transactions ALTER COLUMN transaction_ref TYPE VARCHAR(200);
-    ALTER TABLE transactions ALTER COLUMN phone TYPE VARCHAR(50);
-    ALTER TABLE transactions ALTER COLUMN product TYPE VARCHAR(100);
-    ALTER TABLE transactions ALTER COLUMN service_id TYPE VARCHAR(100);
-
-    ALTER TABLE user_accounts ALTER COLUMN bank_name TYPE VARCHAR(150);
-    ALTER TABLE user_accounts ALTER COLUMN account_number TYPE VARCHAR(50);
-    ALTER TABLE user_accounts ALTER COLUMN account_name TYPE VARCHAR(150);
-    ALTER TABLE user_accounts ALTER COLUMN provider TYPE VARCHAR(100);
-  `);
-  console.log("✅ Schema adjusted");
-}
-
-// === Deep search for accountDetails in a user doc ===
-function findAccountDetails(userObj) {
-  if (!userObj || typeof userObj !== "object") return null;
-
-  if (
-    userObj.bankName &&
-    userObj.accountNumber &&
-    userObj.accountName
-  ) {
-    return {
-      bankName: userObj.bankName,
-      accountNumber: userObj.accountNumber,
-      accountName: userObj.accountName,
-      provider: userObj.provider || null
-    };
-  }
-
-  for (const key in userObj) {
-    if (typeof userObj[key] === "object") {
-      const found = findAccountDetails(userObj[key]);
-      if (found) return found;
-    }
-  }
-  return null;
-}
-
-// === Migrate Users ===
-async function migrateUsers() {
-  console.log("Migrating users...");
-  const snapshot = await firestore.collection("users").get();
-  let migratedCount = 0, skippedCount = 0, accountsCount = 0;
-
-  for (const doc of snapshot.docs) {
-    const user = doc.data();
-
-    // Migrate user profile
-    if (!(await recordExists("users", "uid", doc.id))) {
-      await pool.query(
-        `INSERT INTO users (uid, full_name, email, phone, balance, is_admin)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [
-          doc.id,
-          user.fullName || null,
-          user.email || null,
-          user.phone || null,
-          user.balance || 0,
-          user.isAdmin || false
-        ]
-      );
-      migratedCount++;
-    } else {
-      skippedCount++;
-    }
-
-    // Migrate account details (search deeply)
-    const acc = findAccountDetails(user);
-    if (acc && !(await recordExists("user_accounts", "account_number", acc.accountNumber))) {
-      await pool.query(
-        `INSERT INTO user_accounts (uid, bank_name, account_number, account_name, provider)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [doc.id, acc.bankName, acc.accountNumber, acc.accountName, acc.provider]
-      );
-      accountsCount++;
-    }
-  }
-
-  console.log(`✅ Users migrated: ${migratedCount} | Skipped: ${skippedCount}`);
-  console.log(`✅ Accounts migrated: ${accountsCount}`);
-}
-
-// === Migrate Transactions ===
-async function migrateTransactions() {
-  console.log("Migrating transactions...");
-  const snapshot = await firestore.collection("transactions").get();
-  let migratedCount = 0, skippedCount = 0;
-
-  for (const doc of snapshot.docs) {
-    const tx = doc.data();
-    let requestId = tx.requestId || `req_${nextRequestId++}`;
-
-    if (await recordExists("transactions", "request_id", requestId)) {
-      skippedCount++;
-      continue;
-    }
-
-    await pool.query(
-      `INSERT INTO transactions (
-        request_id, uid, type_id, status_id, amount, amount_charged, discount,
-        balance_before, balance_after, phone, product, service_id, customer_id,
-        reference, order_id, message, gross_amount, fee, net_amount, transaction_ref, extra
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7,
-        $8, $9, $10, $11, $12, $13,
-        $14, $15, $16, $17, $18, $19, $20, $21
-      )`,
-      [
-        requestId,
-        tx.uid || null,
-        typeMap[tx.type] || null,
-        statusMap[tx.status] || 3,
-        tx.amount || null,
-        tx.amountCharged || null,
-        tx.discount || 0,
-        tx.balanceBefore || null,
-        tx.balanceAfter || null,
-        tx.phone || null,
-        tx.product || null,
-        tx.serviceID || null,
-        tx.customerID || null,
-        tx.reference || null,
-        tx.orderId || null,
-        tx.message || null,
-        tx.grossAmount || null,
-        tx.fee || null,
-        tx.netAmount || null,
-        tx.transactionRef || null,
-        JSON.stringify({
-          plan: tx.plan,
-          variation_id: tx.variation_id,
-          value: tx.value,
-          quantity: tx.quantity,
-          epins: tx.epins,
-          token: tx.token,
-          customerName: tx.customerName,
-          customerAddress: tx.customerAddress,
-          disco: tx.disco,
-          serviceFee: tx.serviceFee,
-          totalCharged: tx.totalCharged
-        })
-      ]
-    );
-    migratedCount++;
-  }
-
-  console.log(`✅ Transactions migrated: ${migratedCount} | Skipped: ${skippedCount}`);
-}
-
-// === Run ===
-(async () => {
+// === Migration ===
+async function migrate() {
   try {
-    await ensureSchemaReady();
-    await migrateUsers();
-    await migrateTransactions();
-    console.log("🎉 Migration complete!");
+    console.log("🚀 Starting migration from RTDB → PostgreSQL");
+
+    // Step 0: Clear existing data
+    await deepCleanTables();
+
+    // 1️⃣ Disabled Plans
+    const disabledPlansSnap = await database.ref("vtu/disabledPlans").once("value");
+    if (disabledPlansSnap.exists()) {
+      const disabledPlansData = disabledPlansSnap.val();
+      for (const network in disabledPlansData) {
+        for (const planType in disabledPlansData[network]) {
+          await pool.query(
+            `INSERT INTO disabled_plans (network, plan_type, status)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (network, plan_type) DO NOTHING`,
+            [network, planType, disabledPlansData[network][planType]]
+          );
+        }
+      }
+      console.log("✅ Migrated disabled_plans");
+    }
+
+    // 2️⃣ Users + Accounts + Withdrawals + Transactions
+    const usersSnap = await database.ref("vtu/users").once("value");
+    if (usersSnap.exists()) {
+      const usersData = usersSnap.val();
+
+      for (const uid in usersData) {
+        const { withdrawals, transactions, accountDetails, ...userData } = usersData[uid];
+
+        // Insert user
+        await pool.query(
+          `INSERT INTO users (uid, full_name, email, phone, balance, is_admin)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            uid,
+            userData.fullName || null,
+            userData.email || null,
+            userData.phone || null,
+            userData.balance || 0,
+            userData.isAdmin || false
+          ]
+        );
+
+        // Insert account details
+        if (accountDetails?.bankName && accountDetails?.accountNumber && accountDetails?.accountName) {
+          await pool.query(
+            `INSERT INTO user_accounts (uid, bank_name, account_number, account_name, provider)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [
+              uid,
+              accountDetails.bankName,
+              accountDetails.accountNumber,
+              accountDetails.accountName,
+              accountDetails.provider || null
+            ]
+          );
+        }
+
+        // Withdrawals
+        if (withdrawals) {
+          for (const withdrawalId in withdrawals) {
+            await pool.query(
+              `INSERT INTO withdrawals (id, uid, amount, status, created_at)
+               VALUES ($1, $2, $3, $4, to_timestamp($5 / 1000))`,
+              [
+                withdrawalId,
+                uid,
+                withdrawals[withdrawalId].amount || 0,
+                statusMap[withdrawals[withdrawalId].status] || 3,
+                withdrawals[withdrawalId].createdAt || Date.now()
+              ]
+            );
+          }
+        }
+
+        // Transactions
+        if (transactions) {
+          for (const txId in transactions) {
+            const tx = transactions[txId];
+            await pool.query(
+              `INSERT INTO transactions (
+                request_id, uid, type_id, status_id, amount, amount_charged, discount,
+                balance_before, balance_after, phone, product, service_id, customer_id,
+                reference, order_id, message, gross_amount, fee, net_amount, transaction_ref, extra
+              ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7,
+                $8, $9, $10, $11, $12, $13,
+                $14, $15, $16, $17, $18, $19, $20, $21
+              )`,
+              [
+                txId,
+                uid,
+                typeMap[tx.type] || null,
+                statusMap[tx.status] || 3,
+                tx.amount || null,
+                tx.amountCharged || null,
+                tx.discount || 0,
+                tx.balanceBefore || null,
+                tx.balanceAfter || null,
+                tx.phone || null,
+                tx.product || null,
+                tx.serviceID || null,
+                tx.customerID || null,
+                tx.reference || null,
+                tx.orderId || null,
+                tx.message || null,
+                tx.grossAmount || null,
+                tx.fee || null,
+                tx.netAmount || null,
+                tx.transactionRef || null,
+                JSON.stringify({
+                  plan: tx.plan,
+                  variation_id: tx.variation_id,
+                  value: tx.value,
+                  quantity: tx.quantity,
+                  epins: tx.epins,
+                  token: tx.token,
+                  customerName: tx.customerName,
+                  customerAddress: tx.customerAddress,
+                  disco: tx.disco,
+                  serviceFee: tx.serviceFee,
+                  totalCharged: tx.totalCharged
+                })
+              ]
+            );
+          }
+        }
+      }
+
+      console.log("✅ Migrated users, user_accounts, withdrawals, transactions");
+    }
+
+    console.log("🎉 Migration completed successfully!");
   } catch (err) {
-    console.error("❌ Migration error:", err);
+    console.error("❌ Migration failed:", err);
   } finally {
     await pool.end();
-    process.exit();
   }
-})();
+}
+
+migrate();
