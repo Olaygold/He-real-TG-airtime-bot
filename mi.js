@@ -1,90 +1,85 @@
-const { admin, database } = require("./fire"); // Firebase RTDB connection
+const { database } = require("./fire");
 const { Pool } = require("pg");
-require("dotenv").config();
 
-// PostgreSQL connection (with your actual database URL)
 const pool = new Pool({
   connectionString: "postgresql://postgres:xnkFLFwceOoYidzkKmaYJodaSYFPbMnB@gondola.proxy.rlwy.net:59649/railway",
-  ssl: { 
-    rejectUnauthorized: false 
-  }
+  ssl: { rejectUnauthorized: false }
 });
 
-async function migrateAccountDetails() {
-  console.log("🚀 Starting account details migration...");
-  const startTime = Date.now();
+async function migrateAccounts() {
+  console.log("🔍 Starting PRECISE migration for accountDetails");
 
   try {
-    // 1. Fetch all users from Firebase
-    const usersSnap = await database.ref("vtu/users").once("value");
-    if (!usersSnap.exists()) {
-      console.log("ℹ️ No users found in Firebase");
-      return { success: false, message: "No users found" };
+    // 1. Access the exact path
+    const usersRef = database.ref("vtu/users");
+    const snapshot = await usersRef.once("value");
+
+    if (!snapshot.exists()) {
+      console.log("❌ No data at vtu/users");
+      return;
     }
 
-    const users = usersSnap.val();
-    let migratedCount = 0;
-    let errorCount = 0;
+    const users = snapshot.val();
+    console.log(`📊 Found ${Object.keys(users).length} users`);
 
-    // 2. Process each user's account details
-    for (const [uid, userData] of Object.entries(users)) {
-      try {
-        // Extract account details from root level (your Firebase structure)
-        const { accountName, accountNumber, bank } = userData;
+    // 2. Process each user
+    for (const [uid, user] of Object.entries(users)) {
+      console.log(`\n👤 User ${uid}`);
 
-        // Skip if no account number exists
-        if (!accountNumber) continue;
-
-        // 3. Insert into PostgreSQL
-        await pool.query(
-          `INSERT INTO user_accounts (
-            uid, 
-            bank_name, 
-            account_number, 
-            account_name
-          ) VALUES ($1, $2, $3, $4)
-          ON CONFLICT (account_number) DO NOTHING`,
-          [uid, bank || null, accountNumber, accountName || null]
-        );
-        migratedCount++;
-      } catch (err) {
-        errorCount++;
-        console.error(`❌ Error migrating account for ${uid}:`, err.message);
+      // 3. Check for accountDetails (now nested!)
+      if (!user.accountDetails) {
+        console.log("⏩ Skipped - No accountDetails");
+        continue;
       }
+
+      const { 
+        accountName, 
+        accountNumber, 
+        bank,
+        accountReference // Optional field
+      } = user.accountDetails;
+
+      if (!accountNumber) {
+        console.log("⏩ Skipped - No accountNumber");
+        continue;
+      }
+
+      console.log("💳 Account Details:", {
+        accountName,
+        accountNumber,
+        bank
+      });
+
+      // 4. Insert into PostgreSQL
+      await pool.query(`
+        INSERT INTO user_accounts (
+          uid,
+          bank_name,
+          account_number,
+          account_name,
+          provider,
+          extra
+        ) VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (account_number) DO NOTHING
+      `, [
+        uid,
+        bank || null,
+        accountNumber,
+        accountName || null,
+        null, // Provider not in your data
+        JSON.stringify({ reference: accountReference }) // Store extra data
+      ]);
+
+      console.log("✅ Migrated successfully");
     }
 
-    // 4. Report results
-    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-    console.log(`
-    🎉 Migration Complete!
-    ⏱️  Duration: ${duration}s
-    ✅ Successfully migrated: ${migratedCount} accounts
-    ❌ Errors encountered: ${errorCount}
-    `);
-
-    return {
-      success: true,
-      duration: `${duration}s`,
-      migratedCount,
-      errorCount
-    };
+    console.log("\n🎉 Migration completed!");
 
   } catch (err) {
-    console.error("🔥 Critical migration error:", err);
-    return { success: false, error: err.message };
+    console.error("💥 FATAL ERROR:", err);
   } finally {
     await pool.end();
   }
 }
 
-// Execute the migration (with error handling)
-migrateAccountDetails()
-  .then(result => {
-    if (!result.success) {
-      process.exit(1); // Exit with error code if failed
-    }
-  })
-  .catch(err => {
-    console.error("Unhandled migration error:", err);
-    process.exit(1);
-  });
+migrateAccounts();
