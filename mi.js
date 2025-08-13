@@ -3,7 +3,7 @@ const firestore = admin.firestore();
 const { Pool } = require("pg");
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || "postgresql://postgres:xnkFLFwceOoYidzkKmaYJodaSYFPbMnB@gondola.proxy.rlwy.net:59649/railway",
+  connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
@@ -28,16 +28,11 @@ const typeMap = {
   "datacard": 9
 };
 
-// === Get starting request_id index ===
-async function getNextRequestIdStart() {
-  const res = await pool.query("SELECT COUNT(*) AS count FROM transactions");
-  return parseInt(res.rows[0].count) + 1; // Start after existing count
-}
-
 let nextRequestId = 1;
 
-// === Helper to check existence ===
+// === Helper to check if record exists ===
 async function recordExists(table, column, value) {
+  if (!value) return false;
   const result = await pool.query(`SELECT 1 FROM ${table} WHERE ${column} = $1 LIMIT 1`, [value]);
   return result.rowCount > 0;
 }
@@ -50,6 +45,7 @@ async function migrateUsers() {
   for (const doc of snapshot.docs) {
     const user = doc.data();
 
+    // Skip if user already migrated
     if (await recordExists("users", "uid", doc.id)) continue;
 
     await pool.query(`
@@ -64,18 +60,26 @@ async function migrateUsers() {
       user.isAdmin || false
     ]);
 
-    if (user.bankName && user.accountNumber && user.accountName) {
-      await pool.query(`
-        INSERT INTO user_accounts (uid, bank_name, account_number, account_name, provider)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT DO NOTHING
-      `, [
-        doc.id,
-        user.bankName,
-        user.accountNumber,
-        user.accountName,
-        user.provider || null
-      ]);
+    // Account details from accountDetails object
+    const acc = user.accountDetails || {};
+    const bankName = acc.bankName || null;
+    const accountNumber = acc.accountNumber || null;
+    const accountName = acc.accountName || null;
+    const provider = acc.provider || null;
+
+    if (bankName && accountNumber && accountName) {
+      if (!(await recordExists("user_accounts", "account_number", accountNumber))) {
+        await pool.query(`
+          INSERT INTO user_accounts (uid, bank_name, account_number, account_name, provider)
+          VALUES ($1, $2, $3, $4, $5)
+        `, [
+          doc.id,
+          bankName,
+          accountNumber,
+          accountName,
+          provider
+        ]);
+      }
     }
   }
   console.log("✅ Users migrated");
@@ -84,50 +88,45 @@ async function migrateUsers() {
 // === Migrate Transactions ===
 async function migrateTransactions() {
   console.log("Migrating transactions...");
-  nextRequestId = await getNextRequestIdStart();
-
   const snapshot = await firestore.collection("transactions").get();
 
   for (const doc of snapshot.docs) {
     const tx = doc.data();
 
-    // Handle request_id
+    // Ensure request_id exists
     let requestId = tx.requestId;
     if (!requestId) {
       requestId = `req_${nextRequestId}`;
       nextRequestId++;
     }
 
+    // Skip if already migrated
     if (await recordExists("transactions", "request_id", requestId)) continue;
-
-    // Handle missing status
-    const statusId = statusMap[tx.status] || statusMap["pending"];
 
     await pool.query(`
       INSERT INTO transactions (
         request_id, uid, type_id, status_id, amount, amount_charged, discount,
-        balance_before, balance_after, phone, network, product, service_id, customer_id,
+        balance_before, balance_after, phone, product, service_id, customer_id,
         reference, order_id, message, gross_amount, fee, net_amount, transaction_ref,
         extra
       )
       VALUES (
         $1, $2, $3, $4, $5, $6, $7,
-        $8, $9, $10, $11, $12, $13, $14,
-        $15, $16, $17, $18, $19, $20, $21,
-        $22
+        $8, $9, $10, $11, $12, $13,
+        $14, $15, $16, $17, $18, $19, $20,
+        $21
       )
     `, [
       requestId,
-      tx.uid,
+      tx.uid || null,
       typeMap[tx.type] || null,
-      statusId,
+      statusMap[tx.status] || 3, // default to pending
       tx.amount || null,
       tx.amountCharged || null,
       tx.discount || 0,
       tx.balanceBefore || null,
       tx.balanceAfter || null,
       tx.phone || null,
-      tx.network || null,
       tx.product || null,
       tx.serviceID || null,
       tx.customerID || null,
