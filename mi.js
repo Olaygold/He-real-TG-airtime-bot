@@ -28,6 +28,12 @@ const typeMap = {
   "datacard": 9
 };
 
+// === Get starting request_id index ===
+async function getNextRequestIdStart() {
+  const res = await pool.query("SELECT COUNT(*) AS count FROM transactions");
+  return parseInt(res.rows[0].count) + 1; // Start after existing count
+}
+
 let nextRequestId = 1;
 
 // === Helper to check existence ===
@@ -44,7 +50,6 @@ async function migrateUsers() {
   for (const doc of snapshot.docs) {
     const user = doc.data();
 
-    // Skip if already migrated
     if (await recordExists("users", "uid", doc.id)) continue;
 
     await pool.query(`
@@ -79,20 +84,24 @@ async function migrateUsers() {
 // === Migrate Transactions ===
 async function migrateTransactions() {
   console.log("Migrating transactions...");
+  nextRequestId = await getNextRequestIdStart();
+
   const snapshot = await firestore.collection("transactions").get();
 
   for (const doc of snapshot.docs) {
     const tx = doc.data();
 
-    // Ensure request_id exists
+    // Handle request_id
     let requestId = tx.requestId;
     if (!requestId) {
       requestId = `req_${nextRequestId}`;
       nextRequestId++;
     }
 
-    // Skip if already migrated
     if (await recordExists("transactions", "request_id", requestId)) continue;
+
+    // Handle missing status
+    const statusId = statusMap[tx.status] || statusMap["pending"];
 
     await pool.query(`
       INSERT INTO transactions (
@@ -111,7 +120,7 @@ async function migrateTransactions() {
       requestId,
       tx.uid,
       typeMap[tx.type] || null,
-      statusMap[tx.status] || null,
+      statusId,
       tx.amount || null,
       tx.amountCharged || null,
       tx.discount || 0,
