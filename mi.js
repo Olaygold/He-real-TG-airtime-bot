@@ -3,7 +3,7 @@ const { Pool } = require("pg");
 
 // === Railway PostgreSQL Connection ===
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || "postgresql://postgres:YOUR_PASSWORD@gondola.proxy.rlwy.net:59649/railway",
+  connectionString: process.env.DATABASE_URL || "postgresql://postgres:xnkFLFwceOoYidzkKmaYJodaSYFPbMnB@postgres.railway.internal:5432/railway",
   ssl: { rejectUnauthorized: false }
 });
 
