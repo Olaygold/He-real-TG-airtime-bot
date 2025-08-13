@@ -6,11 +6,39 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
+async function ensureColumnsExist() {
+  try {
+    // Check if account_reference column exists
+    const checkQuery = `
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'user_accounts' 
+      AND column_name = 'account_reference'
+    `;
+    
+    const result = await pool.query(checkQuery);
+    
+    if (result.rows.length === 0) {
+      console.log("🛠 Adding missing account_reference column");
+      await pool.query(`
+        ALTER TABLE user_accounts 
+        ADD COLUMN account_reference VARCHAR(255)
+      `);
+    }
+  } catch (err) {
+    console.error("❌ Failed to ensure columns exist:", err);
+    throw err;
+  }
+}
+
 async function migrateAccounts() {
-  console.log("🔍 Starting PRECISE migration for accountDetails");
+  console.log("🔍 Starting migration with duplicate protection");
 
   try {
-    // 1. Access the exact path
+    // 1. Ensure all columns exist
+    await ensureColumnsExist();
+
+    // 2. Fetch users from Firebase
     const usersRef = database.ref("vtu/users");
     const snapshot = await usersRef.once("value");
 
@@ -22,11 +50,10 @@ async function migrateAccounts() {
     const users = snapshot.val();
     console.log(`📊 Found ${Object.keys(users).length} users`);
 
-    // 2. Process each user
+    // 3. Process each user
     for (const [uid, user] of Object.entries(users)) {
-      console.log(`\n👤 User ${uid}`);
+      console.log(`\n👤 Processing user ${uid}`);
 
-      // 3. Check for accountDetails (now nested!)
       if (!user.accountDetails) {
         console.log("⏩ Skipped - No accountDetails");
         continue;
@@ -36,7 +63,7 @@ async function migrateAccounts() {
         accountName, 
         accountNumber, 
         bank,
-        accountReference // Optional field
+        accountReference 
       } = user.accountDetails;
 
       if (!accountNumber) {
@@ -44,30 +71,39 @@ async function migrateAccounts() {
         continue;
       }
 
-      console.log("💳 Account Details:", {
-        accountName,
+      // 4. Check if account already exists
+      const existsResult = await pool.query(
+        `SELECT 1 FROM user_accounts WHERE account_number = $1`,
+        [accountNumber]
+      );
+
+      if (existsResult.rows.length > 0) {
+        console.log("⏩ Skipped - Account already exists");
+        continue;
+      }
+
+      console.log("💳 Migrating account:", {
         accountNumber,
-        bank
+        accountName,
+        bank,
+        accountReference
       });
 
-      // 4. Insert into PostgreSQL
+      // 5. Insert with all fields
       await pool.query(`
         INSERT INTO user_accounts (
           uid,
           bank_name,
           account_number,
           account_name,
-          provider,
-          extra
-        ) VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (account_number) DO NOTHING
+          account_reference
+        ) VALUES ($1, $2, $3, $4, $5)
       `, [
         uid,
         bank || null,
         accountNumber,
         accountName || null,
-        null, // Provider not in your data
-        JSON.stringify({ reference: accountReference }) // Store extra data
+        accountReference || null
       ]);
 
       console.log("✅ Migrated successfully");
