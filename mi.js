@@ -1,10 +1,7 @@
-const { admin } = require("./fire"); // uses your existing Firebase setup
+const { admin } = require("./fire"); // Firebase setup
 const firestore = admin.firestore();
-const pg = require("pg");
+const { Pool } = require("pg");
 
-const { Pool } = pg;
-
-// === PostgreSQL Connection (Railway) ===
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || "postgresql://postgres:xnkFLFwceOoYidzkKmaYJodaSYFPbMnB@gondola.proxy.rlwy.net:59649/railway",
   ssl: { rejectUnauthorized: false }
@@ -31,6 +28,14 @@ const typeMap = {
   "datacard": 9
 };
 
+let nextRequestId = 1;
+
+// === Helper to check existence ===
+async function recordExists(table, column, value) {
+  const result = await pool.query(`SELECT 1 FROM ${table} WHERE ${column} = $1 LIMIT 1`, [value]);
+  return result.rowCount > 0;
+}
+
 // === Migrate Users ===
 async function migrateUsers() {
   console.log("Migrating users...");
@@ -39,11 +44,12 @@ async function migrateUsers() {
   for (const doc of snapshot.docs) {
     const user = doc.data();
 
-    // Insert into users table
+    // Skip if already migrated
+    if (await recordExists("users", "uid", doc.id)) continue;
+
     await pool.query(`
       INSERT INTO users (uid, full_name, email, phone, balance, is_admin)
       VALUES ($1, $2, $3, $4, $5, $6)
-      ON CONFLICT (uid) DO NOTHING
     `, [
       doc.id,
       user.fullName || null,
@@ -53,7 +59,6 @@ async function migrateUsers() {
       user.isAdmin || false
     ]);
 
-    // Insert into user_accounts if bank details exist
     if (user.bankName && user.accountNumber && user.accountName) {
       await pool.query(`
         INSERT INTO user_accounts (uid, bank_name, account_number, account_name, provider)
@@ -79,6 +84,16 @@ async function migrateTransactions() {
   for (const doc of snapshot.docs) {
     const tx = doc.data();
 
+    // Ensure request_id exists
+    let requestId = tx.requestId;
+    if (!requestId) {
+      requestId = `req_${nextRequestId}`;
+      nextRequestId++;
+    }
+
+    // Skip if already migrated
+    if (await recordExists("transactions", "request_id", requestId)) continue;
+
     await pool.query(`
       INSERT INTO transactions (
         request_id, uid, type_id, status_id, amount, amount_charged, discount,
@@ -92,9 +107,8 @@ async function migrateTransactions() {
         $15, $16, $17, $18, $19, $20, $21,
         $22
       )
-      ON CONFLICT (request_id) DO NOTHING
     `, [
-      tx.requestId,
+      requestId,
       tx.uid,
       typeMap[tx.type] || null,
       statusMap[tx.status] || null,
